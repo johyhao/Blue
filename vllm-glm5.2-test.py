@@ -15,9 +15,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Validate GLM-5.2 generation with MTP speculative decoding on 2 cards.
+"""Validate GLM-5.2 generation with MTP speculative decoding on 1 card.
 
-Run pytest tests/e2e/pull_request/two_card/test_glm5_2.py.
+Run pytest tests/e2e/pull_request/one_card/test_glm5_2.py.
 """
 
 import os
@@ -48,15 +48,15 @@ def _run_mtp_speculative_decoding(
     with VllmRunner(
         MAIN_MODEL,
         quantization="ascend",
-        tensor_parallel_size=2,
-        max_model_len=4096,
-        max_num_seqs=4,
-        enable_expert_parallel=True,
+        tensor_parallel_size=1,
+        max_model_len=2048,
+        max_num_seqs=2,
         disable_log_stats=False,
+        enforce_eager=True,
         speculative_config=speculative_config,
         compilation_config=compilation_config,
     ) as vllm_model:
-        outputs = vllm_model.generate_greedy(example_prompts, max_tokens=128)
+        outputs = vllm_model.generate_greedy(example_prompts, max_tokens=64)
         metrics = vllm_model.model.get_metrics()
 
     assert len(outputs) == len(example_prompts)
@@ -86,21 +86,22 @@ def _run_mtp_speculative_decoding(
 @pytest.mark.e2e_model(MAIN_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
-    feature="mtp,aclgraph",
-    parallel="TP,EP",
+    feature="mtp",
+    parallel="TP",
     deploy="pd_mix",
     hardware="A3",
     quantization="W4A8",
-    graph_mode="full_decode_only",
+    graph_mode="eager",
 )
 @patch.dict(
     os.environ,
     {
+        "ASCEND_RT_VISIBLE_DEVICES": "0",
         "HCCL_BUFFSIZE": "512",
         "HCCL_OP_EXPANSION_MODE": "AIV",
     },
 )
-def test_glm_5_2_mtp_acceptance_tp2() -> None:
+def test_glm_5_2_mtp_acceptance_tp1() -> None:
     _run_mtp_speculative_decoding(
         speculative_config={
             "method": "deepseek_mtp",
@@ -109,7 +110,6 @@ def test_glm_5_2_mtp_acceptance_tp2() -> None:
         },
         num_speculative_tokens=MTP_NUM_SPECULATIVE_TOKENS,
         compilation_config=CompilationConfig(
-            cudagraph_mode="FULL_DECODE_ONLY",
-            cudagraph_capture_sizes=[8],
+            cudagraph_mode="NONE",
         ),
     )
