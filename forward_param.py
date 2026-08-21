@@ -1,54 +1,55 @@
-from vllm.forward_context import get_forward_context
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.device.device_op import DeviceOperator
+# ── Extract per-layer attention metadata ──
+            attn_name = f"model.layers.{idx}.self_attn.attn"
+            swa_name = f"model.layers.{idx}.self_attn.swa_cache"
+            idx_k_name = f"model.layers.{idx}.self_attn.indexer.k_cache"
 
-def _patched_forward(self, input_ids, positions, intermediate_tensors, inputs_embeds=None):
-    ctx = get_forward_context()
+            attn_layer = forward_context.no_compile_layers.get(attn_name)
+            attn_metadata = forward_context.attn_metadata.get(attn_name)
+            if attn_metadata is None:
+                attn_metadata = forward_context.attn_metadata.get(swa_name)
+            req_metadata = getattr(attn_metadata, "req_metadata", None)
 
-    # ─── 全局信息 ───
-    num_tokens = positions.shape[0]
-    num_tokens_padded = _EXTRA_CTX.num_tokens
+            # ── kv_cache tuple: [compress_kv, swa_kv, state, idx_state, idx_k, idx_scale] ──
+            kv_cache_tuple = attn_layer.kv_cache if attn_layer is not None else None
 
-    # ─── 逐层提取 ───
-    for idx in range(self.start_layer, self.end_layer):
-        attn_name  = f"model.layers.{idx}.self_attn.attn"
-        swa_name   = f"model.layers.{idx}.self_attn.swa_cache"
-        idx_k_name = f"model.layers.{idx}.self_attn.indexer.k_cache"
+            k_cache = kv_cache_tuple[0] if kv_cache_tuple is not None else None
+            v_cache = kv_cache_tuple[1] if kv_cache_tuple is not None else None
+            num_blocks = k_cache.shape[0] if k_cache is not None else 0
 
-        # 1. Attention metadata
-        attn_meta = ctx.attn_metadata.get(attn_name) or ctx.attn_metadata.get(swa_name)
-        req_meta = attn_meta.req_metadata
+            # ── block_tables / slot_mapping ──
+            block_tables = req_metadata.block_table if req_metadata is not None else None
+            slot_mapping = forward_context.slot_mapping.get(attn_name)
 
-        # 2. KV Cache
-        attn_layer = ctx.no_compile_layers[attn_name]
-        kv_cache_tuple = attn_layer.kv_cache
-        (compress_kv, swa_kv, state_cache,
-         idx_k_cache, idx_scale_cache, _) = DeviceOperator.unpack_dsa_forward_kv_cache(
-            kv_cache_tuple, compress_ratio=4)
+            # ── kv_seq_len / q_seq_len ──
+            kv_seq_len = req_metadata.seq_lens if req_metadata is not None else None
+            query_start_loc = req_metadata.query_start_loc if req_metadata is not None else None
+            q_seq_len = (query_start_loc[1:] - query_start_loc[:-1]) if query_start_loc is not None else None
 
-        # 3. Block table & slot mapping
-        block_table   = req_meta.block_table       # [num_reqs, max_blocks]
-        slot_mapping  = req_meta.slot_mapping       # [num_tokens, 2]
-        num_blocks    = compress_kv.shape[0]
+            # ── num_tokens ──
+            num_tokens = attn_metadata.num_actual_tokens if attn_metadata is not None else 0
 
-        # 4. Sequence lengths
-        kv_seq_len    = req_meta.seq_lens           # [num_reqs]
-        query_start   = req_meta.query_start_loc    # [num_reqs+1]
-        q_seq_len     = query_start[1:] - query_start[:-1]
+            # ── mask / mask_type (DSA uses SAS metadata, not explicit mask) ──
+            mask = req_metadata.attn_mask if req_metadata is not None else None
+            mask_type = attn_metadata.attn_state if attn_metadata is not None else None
 
-        # 5. RoPE cos/sin
-        mla_cos       = req_meta.cos[attn_name]     # [num_tokens, 1, 1, rope_dim]
-        mla_sin       = req_meta.sin[attn_name]
-        index_cos     = req_meta.cos.get(idx_k_name)
-        index_sin     = req_meta.sin.get(idx_k_name)
+            # ── sin_cos_cache (RoPE cos/sin for main attention) ──
+            sin_cos_cache = (
+                (req_metadata.cos.get(attn_name), req_metadata.sin.get(attn_name))
+                if req_metadata is not None and hasattr(req_metadata, "cos")
+                else (None, None)
+            )
 
-        # 6. Mask info (DSA uses SAS metadata, not explicit mask)
-        sas_metadata  = req_meta.sas_metadata        # [1024] int32
-        ori_win_left  = req_meta.ori_win_left        # window_size - 1
-        attn_state    = attn_meta.attn_state          # DecodeOnly / ChunkedPrefill
+            # ── mla_cos_cache / mla_sin_cache (same as main RoPE for MLA prolog) ──
+            mla_cos_cache = sin_cos_cache[0]
+            mla_sin_cache = sin_cos_cache[1]
 
-        # 7. Indexer K buffer
-        index_k_buffer = idx_k_cache                 # [num_blocks, bs, 1, head_dim]
-        index_k_scale  = idx_scale_cache             # [num_blocks, bs, 1, scale_dim]
+            # ── index_cos_sin_cache (Indexer RoPE cos/sin) ──
+            index_cos_sin_cache = (
+                (req_metadata.cos.get(idx_k_name), req_metadata.sin.get(idx_k_name))
+                if req_metadata is not None and hasattr(req_metadata, "cos")
+                else (None, None)
+            )
 
-    # ... 原有 forward 逻辑 ...
+            # ── index_k_buffer / index_k_scale_buffer (Indexer K cache) ──
+            index_k_buffer = kv_cache_tuple[4] if kv_cache_tuple is not None and len(kv_cache_tuple) > 4 else None
+            index_k_scale_buffer = kv_cache_tuple[5] if kv_cache_tuple is not None and len(kv_cache_tuple) > 5 else None
