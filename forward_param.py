@@ -107,3 +107,66 @@
             **self._build_rotary_cache(positions),
             "per_layer": per_layer,
         }
+
+
+
+
+def get_indexer_kv_buffers_from_layers(
+    layers,
+    layer_idx: int,
+) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """
+    从 model.layers 中提取指定层的 index_k_buffer 和 index_k_scale_buffer。
+
+    Args:
+        layers: model.layers (DeepseekV2Model.layers)
+        layer_idx: 层索引
+
+    Returns:
+        (index_k_buffer, index_k_scale_buffer)
+        如果该层没有 indexer，返回 (None, None)
+        如果未启用 LI C8，index_k_scale_buffer 为 None
+    """
+    layer = layers[layer_idx]
+    mla_attn_wrapper = layer.self_attn.mla_attn
+    mla_attn = mla_attn_wrapper.mla_attn
+    impl = mla_attn.impl
+    kv_cache = mla_attn.kv_cache
+
+    if kv_cache is None or not getattr(impl, "has_indexer", False):
+        return None, None
+
+    enable_sparse_sfa_c8 = getattr(impl, "enable_sparse_sfa_c8", False)
+    enable_sparse_li_c8 = getattr(impl, "enable_sparse_li_c8", False)
+
+    if enable_sparse_sfa_c8:
+        k_idx = 1
+        scale_idx = 2 if enable_sparse_li_c8 else None
+    else:
+        k_idx = 2
+        scale_idx = 3 if enable_sparse_li_c8 else None
+
+    index_k_buffer = kv_cache[k_idx]
+    index_k_scale_buffer = kv_cache[scale_idx] if scale_idx is not None else None
+
+    return index_k_buffer, index_k_scale_buffer
+
+
+def get_all_indexer_kv_buffers_from_layers(
+    layers,
+    num_hidden_layers: int,
+) -> dict[int, tuple[Optional[torch.Tensor], Optional[torch.Tensor]]]:
+    """
+    从 model.layers 中提取所有层的 index_k_buffer 和 index_k_scale_buffer。
+
+    Args:
+        layers: model.layers
+        num_hidden_layers: 模型总层数
+
+    Returns:
+        {layer_idx: (index_k_buffer, index_k_scale_buffer)}
+    """
+    result = {}
+    for i in range(num_hidden_layers):
+        result[i] = get_indexer_kv_buffers_from_layers(layers, i)
+    return result
