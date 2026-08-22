@@ -14,33 +14,35 @@
     def _get_kv_cache_params(
         self,
         kv_cache: torch.Tensor | tuple,
-        enable_sparse_sfa_c8: bool,
     ) -> dict[str, torch.Tensor | int | None]:
-        empty = {
+        if kv_cache is None:
+            return self._empty_kv_cache_params()
+        if isinstance(kv_cache, torch.Tensor):
+            if kv_cache.numel() == 0:
+                return self._empty_kv_cache_params()
+            return {
+                "k_cache": kv_cache,
+                "v_cache": kv_cache,
+                "num_blocks": kv_cache.shape[0],
+                "index_k_buffer": None,
+                "index_k_scale_buffer": None,
+            }
+        return {
+            "k_cache": kv_cache[0],
+            "v_cache": kv_cache[0],
+            "num_blocks": kv_cache[0].shape[0] if kv_cache[0] is not None else 0,
+            "index_k_buffer": kv_cache[4] if len(kv_cache) > 4 else None,
+            "index_k_scale_buffer": kv_cache[5] if len(kv_cache) > 5 else None,
+        }
+
+    @staticmethod
+    def _empty_kv_cache_params() -> dict[str, None]:
+        return {
             "k_cache": None,
             "v_cache": None,
             "num_blocks": 0,
             "index_k_buffer": None,
             "index_k_scale_buffer": None,
-        }
-        if kv_cache is None:
-            return empty
-        if isinstance(kv_cache, torch.Tensor) and kv_cache.numel() == 0:
-            return empty
-        if enable_sparse_sfa_c8:
-            k_idx, scale_idx = 1, 2
-        else:
-            k_idx, scale_idx = 2, 3
-        return {
-            "k_cache": kv_cache[0],
-            "v_cache": kv_cache[0],
-            "num_blocks": kv_cache[0].shape[0],
-            "index_k_buffer": (
-                kv_cache[k_idx] if len(kv_cache) > k_idx else None
-            ),
-            "index_k_scale_buffer": (
-                kv_cache[scale_idx] if len(kv_cache) > scale_idx else None
-            ),
         }
 
     def _get_attn_meta(self, layer_name: str, forward_context):
@@ -86,15 +88,10 @@
     ) -> dict:
         from vllm.forward_context import get_forward_context
         forward_context = get_forward_context()
-        enable_sparse_sfa_c8 = getattr(
-            forward_context, "enable_sparse_sfa_c8", False
-        )
         per_layer = []
         for idx in range(self.start_layer, self.end_layer):
             layer_name, kv_cache = self._get_attn_layer(idx)
-            cache_params = self._get_kv_cache_params(
-                kv_cache, enable_sparse_sfa_c8
-            )
+            cache_params = self._get_kv_cache_params(kv_cache)
             meta_params = self._get_attn_meta(
                 layer_name, forward_context
             )
