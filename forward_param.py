@@ -1,68 +1,112 @@
-def _get_forward_metadata(first_self_attn) -> dict:
-    """Extract forward-level metadata once per step, before the layer loop.
+    def _get_attn_layer(self, layer_idx: int):
+        self_attn = self.layers[layer_idx].self_attn
+        if hasattr(self_attn, "mla_attn"):
+            inner = self_attn.mla_attn.mla_attn
+            return inner.layer_name, inner.kv_cache
+        if hasattr(self_attn, "dsa_attn"):
+            wrapper = self_attn.dsa_attn
+            return wrapper.prefix, wrapper.kv_cache
+        raise RuntimeError(
+            f"Layer {layer_idx}: unsupported attention type "
+            f"{type(self_attn).__name__}"
+        )
 
-    Dynamic metadata (block_tables, slot_mapping, etc.) is identical across
-    all layers within a single forward step. Static metadata (sin_cos_cache,
-    k_cache, etc.) is extracted from the first layer as a representative
-    sample — all layers share the same rotary_emb and kv_cache shape.
+    def _get_kv_cache_params(
+        self,
+        kv_cache: torch.Tensor | tuple,
+        enable_sparse_sfa_c8: bool,
+    ) -> dict[str, torch.Tensor | int | None]:
+        empty = {
+            "k_cache": None,
+            "v_cache": None,
+            "num_blocks": 0,
+            "index_k_buffer": None,
+            "index_k_scale_buffer": None,
+        }
+        if kv_cache is None:
+            return empty
+        if isinstance(kv_cache, torch.Tensor) and kv_cache.numel() == 0:
+            return empty
+        if enable_sparse_sfa_c8:
+            k_idx, scale_idx = 1, 2
+        else:
+            k_idx, scale_idx = 2, 3
+        return {
+            "k_cache": kv_cache[0],
+            "v_cache": kv_cache[0],
+            "num_blocks": kv_cache[0].shape[0],
+            "index_k_buffer": (
+                kv_cache[k_idx] if len(kv_cache) > k_idx else None
+            ),
+            "index_k_scale_buffer": (
+                kv_cache[scale_idx] if len(kv_cache) > scale_idx else None
+            ),
+        }
 
-    Called once per forward step (not per layer), producing a single graph
-    break that preserves torch.compile effectiveness for the layer loop.
-    """
-    from vllm.forward_context import get_forward_context
-    _fc = get_forward_context()
+    def _get_attn_meta(self, layer_name: str, forward_context):
+        meta = forward_context.attn_metadata.get(layer_name)
+        if meta is None:
+            return None
+        block_tables = getattr(
+            meta, "block_table",
+            getattr(meta, "block_table_tensor", None),
+        )
+        q_seq_len = getattr(
+            meta, "cum_query_lens",
+            getattr(meta, "query_start_loc", None),
+        )
+        return {
+            "block_tables": block_tables,
+            "slot_mapping": getattr(meta, "slot_mapping", None),
+            "kv_seq_len": getattr(meta, "seq_lens", None),
+            "q_seq_len": q_seq_len,
+            "num_tokens": getattr(meta, "num_input_tokens", 0),
+            "mask": getattr(meta, "attn_mask", None),
+            "mask_type": getattr(meta, "attn_state", None),
+        }
 
-    # ── Static: from first layer's self_attn (representative for all layers) ──
-    sin_cos_cache = first_self_attn.rotary_emb.cos_sin_cache
-    mla_cos_cache = sin_cos_cache
-    mla_sin_cache = sin_cos_cache
+    def _build_rotary_cache(self, positions: torch.Tensor):
+        from vllm_ascend.ops.rotary_embedding import (
+            _cos_cache,
+            _sin_cache,
+            _cos_mla,
+            _sin_mla,
+        )
+        cos_sin = (_cos_cache[positions], _sin_cache[positions])
+        return {
+            "sin_cos_cache": cos_sin,
+            "index_cos_sin_cache": cos_sin,
+            "mla_cos_cache": _cos_mla,
+            "mla_sin_cache": _sin_mla,
+        }
 
-    _mla_kv = first_self_attn.mla_attn.mla_attn.kv_cache
-    k_cache = _mla_kv
-    v_cache = _mla_kv
-    num_blocks = _mla_kv.shape[0] if _mla_kv is not None else 0
-
-    _idx_rope = getattr(first_self_attn, "indexer_rope_emb", None)
-    index_cos_sin_cache = _idx_rope.cos_sin_cache if _idx_rope is not None else None
-
-    _indexer = getattr(first_self_attn, "indexer", None)
-    _idx_k_cache = getattr(_indexer, "k_cache", None) if _indexer is not None else None
-    index_k_buffer = getattr(_idx_k_cache, "kv_cache", None) if _idx_k_cache is not None else None
-    index_k_scale_buffer = index_k_buffer
-
-    # ── Dynamic: from forward_context (same for all layers in this step) ──
-    # Use first layer's name to get representative metadata
-    _attn_name = "model.layers.0.self_attn.attn"
-    _swa_name = "model.layers.0.self_attn.swa_cache"
-    _attn_meta = _fc.attn_metadata.get(_attn_name)
-    if _attn_meta is None:
-        _attn_meta = _fc.attn_metadata.get(_swa_name)
-    _req_meta = getattr(_attn_meta, "req_metadata", None) if _attn_meta is not None else None
-
-    block_tables = getattr(_req_meta, "block_table", None) if _req_meta is not None else None
-    slot_mapping = _fc.slot_mapping.get(_attn_name)
-    kv_seq_len = getattr(_req_meta, "seq_lens", None) if _req_meta is not None else None
-    _qsl = getattr(_req_meta, "query_start_loc", None) if _req_meta is not None else None
-    q_seq_len = (_qsl[1:] - _qsl[:-1]) if _qsl is not None else None
-    num_tokens = getattr(_attn_meta, "num_actual_tokens", 0) if _attn_meta is not None else 0
-    mask = getattr(_req_meta, "attn_mask", None) if _req_meta is not None else None
-    mask_type = getattr(_attn_meta, "attn_state", None) if _attn_meta is not None else None
-
-    return {
-        "sin_cos_cache": sin_cos_cache,
-        "k_cache": k_cache,
-        "v_cache": v_cache,
-        "num_blocks": num_blocks,
-        "block_tables": block_tables,
-        "slot_mapping": slot_mapping,
-        "kv_seq_len": kv_seq_len,
-        "q_seq_len": q_seq_len,
-        "num_tokens": num_tokens,
-        "mask": mask,
-        "mask_type": mask_type,
-        "index_cos_sin_cache": index_cos_sin_cache,
-        "index_k_buffer": index_k_buffer,
-        "index_k_scale_buffer": index_k_scale_buffer,
-        "mla_cos_cache": mla_cos_cache,
-        "mla_sin_cache": mla_sin_cache,
-    }
+    def extract_glm52_params(
+        self,
+        positions: torch.Tensor,
+    ) -> dict:
+        from vllm.forward_context import get_forward_context
+        forward_context = get_forward_context()
+        enable_sparse_sfa_c8 = getattr(
+            forward_context, "enable_sparse_sfa_c8", False
+        )
+        per_layer = []
+        for idx in range(self.start_layer, self.end_layer):
+            layer_name, kv_cache = self._get_attn_layer(idx)
+            cache_params = self._get_kv_cache_params(
+                kv_cache, enable_sparse_sfa_c8
+            )
+            meta_params = self._get_attn_meta(
+                layer_name, forward_context
+            )
+            if meta_params is None:
+                per_layer.append(None)
+                continue
+            per_layer.append({
+                "layer_name": layer_name,
+                **cache_params,
+                **meta_params,
+            })
+        return {
+            **self._build_rotary_cache(positions),
+            "per_layer": per_layer,
+        }
