@@ -78,6 +78,9 @@ void AiCoreProf::RegDevProf() {
 }
 
 void AiCoreProf::GetIsOpenDevProf() {
+    if (profLevel_ == PROF_LEVEL_FUNC_LOG_PMU) {
+        return;
+    }
     if (ProfCheckLevel(PROF_TASK_TIME_L3)) {
         profLevel_ = PROF_LEVEL_FUNC_LOG_PMU;
         return;
@@ -197,7 +200,7 @@ inline void AiCoreProf::ProfInitLog()
 
 inline void AiCoreProf::ProfStopLog()
 {
-    if (!ProfCheckLevel(PROF_TASK_TIME_L2)) {
+    if (profLevel_ == PROF_LEVEL_OFF) {
         return;
     }
     hostAicoreMng_.ForEachManageAicore([&](int coreIdx) {
@@ -214,7 +217,7 @@ inline void AiCoreProf::ProfStopLog()
 
 void AiCoreProf::ProfGetLog(int32_t coreIdx, const struct TaskStat* taskStat)
 {
-    if (!ProfCheckLevel(PROF_TASK_TIME_L2)) {
+    if (profLevel_ == PROF_LEVEL_OFF) {
         return;
     }
     MsprofAicpuPyPtoLogHead* logHead = logHead_[coreIdx];
@@ -429,7 +432,7 @@ void AiCoreProf::ProfStopPmu()
     if (addrs_.ctrl1Addr != nullptr) {
         *addrs_.ctrl1Addr = ctrl1Val_;
     }
-    if (!ProfCheckLevel(PROF_TASK_TIME_L2)) {
+    if (profLevel_ == PROF_LEVEL_OFF) {
         return;
     }
     hostAicoreMng_.ForEachManageAicore([&](int coreIdx) {
@@ -485,7 +488,7 @@ void AiCoreProf::DebugPmuData(int32_t coreIdx, const MsprofAicpuPyPtoPmuData& da
 
 void AiCoreProf::ProfGetPmu(int32_t coreIdx, uint32_t subGraphId, uint32_t taskId, uint64_t taskCtrlTaskId)
 {
-    if (!ProfCheckLevel(PROF_TASK_TIME_L3)) {
+    if (profLevel_ != PROF_LEVEL_FUNC_LOG_PMU) {
         return;
     }
 
