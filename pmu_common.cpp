@@ -95,8 +95,7 @@ void SetPmuEventTypeDAV3510(int32_t profPmuType, std::vector<int64_t>& pmuEvtTyp
 
 void PmuCommon::InitPmuEventType(const ArchInfo& archInfo, std::vector<int64_t>& pmuEvtType)
 {
-    bool isDav2201Family = (archInfo == ArchInfo::DAV_2201 || archInfo == ArchInfo::DAV_2002);
-    size_t pmuEvtTypeSize = isDav2201Family ? PMU_EVENT_TYPE_MAX_DAV2201 : PMU_EVENT_TYPE_MAX_DAV3510;
+    size_t pmuEvtTypeSize = (archInfo == ArchInfo::DAV_3510) ? PMU_EVENT_TYPE_MAX_DAV3510 : PMU_EVENT_TYPE_MAX_DAV2201;
     pmuEvtType.resize(pmuEvtTypeSize, 0x0);
     // 获取pmu事件类型环境变量获取方式
     std::string eventTypeStr = GetEnvVar("PROF_PMU_EVENT_TYPE");
@@ -113,7 +112,7 @@ void PmuCommon::InitPmuEventType(const ArchInfo& archInfo, std::vector<int64_t>&
             e.what());
     }
 
-    if (isDav2201Family) {
+    if (archInfo == ArchInfo::DAV_2201 || archInfo == ArchInfo::DAV_2002) {
         SetPmuEventTypeDAV2201(profPmuType, pmuEvtType);
     } else if (archInfo == ArchInfo::DAV_3510) {
         SetPmuEventTypeDAV3510(profPmuType, pmuEvtType);
