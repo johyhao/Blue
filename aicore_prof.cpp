@@ -115,15 +115,13 @@ void AiCoreProf::ProfInit(DeviceArgs *deviceArgs) {
     }
     DEV_DEBUG("Pypto config prof level is %d, profFuncPtr: %p", profLevel_, profReportAdditionalInfoFunc_);
     archInfo_ = deviceArgs->archInfo;
-    if ((profLevel_ == PROF_LEVEL_FUNC_LOG) || (profLevel_ == PROF_LEVEL_FUNC_LOG_PMU)) {
-        profLevel_ = PROF_LEVEL_FUNC_LOG;
+    if (profLevel_ == PROF_LEVEL_FUNC_LOG) {
         ProfInitLog();
-#if PMU_COLLECT
+    } else if (profLevel_ == PROF_LEVEL_FUNC_LOG_PMU) {
+        ProfInitLog();
         ProfInitPmu(
             reinterpret_cast<int64_t*>(deviceArgs->corePmuRegAddr),
             reinterpret_cast<int64_t*>(deviceArgs->pmuEventAddr));
-        profLevel_ = PROF_LEVEL_FUNC_LOG_PMU;
-#endif
     } else {
         profLevel_ = PROF_LEVEL_OFF;
         DEV_INFO("aicore profiling is closed..");
@@ -428,7 +426,7 @@ void AiCoreProf::ProfStartPmu()
 void AiCoreProf::ProfStopPmu()
 {
     *addrs_.ctrl0Addr = ctrl0Val_;
-    if (archInfo_ == ArchInfo::DAV_3510) {
+    if (addrs_.ctrl1Addr != nullptr) {
         *addrs_.ctrl1Addr = ctrl1Val_;
     }
     if (!ProfCheckLevel(PROF_TASK_TIME_L2)) {
@@ -487,7 +485,7 @@ void AiCoreProf::DebugPmuData(int32_t coreIdx, const MsprofAicpuPyPtoPmuData& da
 
 void AiCoreProf::ProfGetPmu(int32_t coreIdx, uint32_t subGraphId, uint32_t taskId, uint64_t taskCtrlTaskId)
 {
-    if (!ProfCheckLevel(PROF_TASK_TIME_L2)) {
+    if (!ProfCheckLevel(PROF_TASK_TIME_L3)) {
         return;
     }
 
